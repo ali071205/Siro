@@ -44,3 +44,5 @@ weasyprint              # Requires system libs — see Dockerfile
 # google-search-results  ← REMOVED (replaced by free APIs)
 # rendercv[full]         ← REMOVED (replaced by WeasyPrint)
 # fastembed              ← REMOVED (replaced by Jina AI + sentence-transformers)
+pypdf
+python-multipart

@@ -23,7 +23,6 @@ from core.database_manager import update_job_lead, get_lead_by_id
 from core.logger import get_logger
 from delivery.card_formatter import (
     format_job_card,
-    format_cold_email_preview,
     format_review_card,
 )
 from delivery.feedback_processor import (
@@ -63,10 +62,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[0]
     payload = parts[1] if len(parts) > 1 else ""
 
-    if action == "apply":
-        await _on_auto_apply(context, chat_id, payload)
-
-    elif action == "review":
+    if action == "review":
         await _on_review(context, chat_id, payload)
         await query.edit_message_reply_markup(reply_markup=None)
 
@@ -80,14 +76,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _on_skip(context, chat_id, job_id, reason)
         await query.edit_message_reply_markup(reply_markup=None)
 
-    elif action == "email":
-        # Show cold email preview
-        lead = get_lead_by_id(payload)
-        if lead:
-            msg = format_cold_email_preview(lead)
-            await context.bot.send_message(
-                chat_id=chat_id, text=msg, parse_mode="Markdown"
-            )
+
 
     elif action == "resume":
         # Legacy PDF button — send resume URL or upload local file
@@ -119,9 +108,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=chat_id, text="Resume PDF not yet generated."
                 )
-
-    elif action == "sendemail":
-        await _on_auto_apply(context, chat_id, payload)
 
 
 from telegram.ext import CommandHandler
@@ -202,23 +188,6 @@ async def send_job_card(lead: dict) -> bool:
             disable_web_page_preview=True,
         )
 
-        # ── 2. Send cold email preview inline ─────────────────────────────────
-        notes_raw = lead.get("notes") or "{}"
-        try:
-            notes = json.loads(notes_raw)
-        except Exception:
-            notes = {}
-
-        cold_email = notes.get("cold_email", "")
-        if cold_email:
-            email_preview = format_cold_email_preview(lead)
-            email_keyboard = _build_email_keyboard(job_id)
-            await bot.send_message(
-                chat_id=chat_id,
-                text=email_preview,
-                parse_mode="Markdown",
-                reply_markup=email_keyboard,
-            )
 
         # Mark as Approved (delivered to user)
         update_job_lead(job_id, {"status": "Approved"})
@@ -231,77 +200,6 @@ async def send_job_card(lead: dict) -> bool:
 
 
 # ── Action handlers ────────────────────────────────────────────────────────────
-
-async def _on_auto_apply(context, chat_id: int, job_id: str):
-    """Handle Auto-Apply button — send cold email via Gmail."""
-    from interface.email_dispatcher import send_cold_email
-    from intelligence.email_hunter import find_company_email
-
-    lead = get_lead_by_id(job_id)
-    if not lead:
-        await context.bot.send_message(chat_id=chat_id, text="Lead not found.")
-        return
-
-    notes_raw = lead.get("notes") or "{}"
-    try:
-        notes = json.loads(notes_raw)
-    except Exception:
-        notes = {}
-
-    cold_email  = notes.get("cold_email", "")
-    resume_url  = lead.get("resume_url") or notes.get("resume_path", "")
-    company     = lead.get("company", "")
-    title       = lead.get("title", "")
-
-    if not cold_email:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="⚠️ No cold email generated for this lead."
-        )
-        return
-
-    # Hunt for recruiter email
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"🔍 Hunting recruiter email at {company}…"
-    )
-    target_email = find_company_email(company)
-
-    if not target_email:
-        target_email = os.getenv("GMAIL_USER", "")
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⚠️ Could not find recruiter email. Sending to self ({target_email}) for manual forwarding."
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🎯 Recruiter found: {target_email}. Dispatching…"
-        )
-
-    # Parse subject/body
-    lines   = cold_email.strip().split("\n")
-    subject = (
-        lines[0].replace("Subject: ", "")
-        if lines[0].startswith("Subject:")
-        else f"Application: {title} at {company}"
-    )
-    body    = "\n".join(lines[1:]).strip() if lines[0].startswith("Subject:") else cold_email
-
-    success = send_cold_email(target_email, subject, body, resume_url)
-
-    if success:
-        await handle_apply(job_id)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"✅ Applied to *{company}*! Email sent to {target_email}.",
-            parse_mode="Markdown",
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"❌ Failed to send email. Check GMAIL_USER and GMAIL_APP_PASSWORD in .env."
-        )
 
 
 async def _on_review(context, chat_id: int, job_id: str):
@@ -348,7 +246,6 @@ async def _on_skip(context, chat_id: int, job_id: str, reason: str):
 def _build_main_keyboard(job_id: str, has_resume: bool = False) -> InlineKeyboardMarkup:
     """Main action keyboard (optionally with PDF download button)."""
     buttons = [
-        InlineKeyboardButton("✅ Auto-Apply",  callback_data=f"apply_{job_id}"),
         InlineKeyboardButton("👀 Review",      callback_data=f"review_{job_id}"),
         InlineKeyboardButton("❌ Skip",        callback_data=f"skipask_{job_id}"),
     ]
@@ -357,10 +254,4 @@ def _build_main_keyboard(job_id: str, has_resume: bool = False) -> InlineKeyboar
     return InlineKeyboardMarkup([buttons])
 
 
-def _build_email_keyboard(job_id: str) -> InlineKeyboardMarkup:
-    """Email action keyboard."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🚀 Send This Email", callback_data=f"sendemail_{job_id}"),
-        ]
-    ])
+

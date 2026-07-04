@@ -10,6 +10,7 @@ Final score is 0–100. Band assigned as HOT / WARM / COLD / REJECT.
 """
 import asyncio
 import json
+import os
 from typing import Optional
 
 from core.config import (
@@ -110,6 +111,10 @@ async def score_job(
     if not desc:
         logger.warning(f"Scorer: job {job_id} has no description — skipping.")
         return {}
+        
+    # Check blacklist if provided in kwargs
+    # We will pass blacklist through master_embedding as a hack, or better just use a global
+    # Wait, it's cleaner to pass blacklist into score_job as arguments. Let's just do it in run_scoring before calling score_job.
 
     try:
         # Signal 1: Semantic similarity
@@ -187,17 +192,52 @@ async def run_scoring(profile: dict) -> dict:
 
     logger.info(f"Scoring {len(leads)} leads for user {user_id}…")
 
+    # Fetch settings from user profile
+    preferences = profile.get("preferences") or {}
+    
+    # Fallback to settings.json if preferences is empty
+    if not preferences:
+        try:
+            with open("settings.json", "r") as f:
+                preferences = json.load(f)
+        except:
+            pass
+            
+    scoring_settings = preferences.get("scoring", {})
+    blacklist_companies = [c.lower() for c in scoring_settings.get("blacklist_companies", [])]
+    blacklist_keywords = [k.lower() for k in scoring_settings.get("blacklist_keywords", [])]
+
     counts = {"hot": 0, "warm": 0, "cold": 0, "reject": 0}
+    
+    # Pre-filter blacklist
+    filtered_leads = []
+    for lead in leads:
+        company_lower = (lead.get("company") or "").lower()
+        desc_lower = (lead.get("raw_description") or "").lower()
+        
+        is_blacklisted = False
+        if any(bc in company_lower for bc in blacklist_companies if bc):
+            is_blacklisted = True
+        elif any(bk in desc_lower for bk in blacklist_keywords if bk):
+            is_blacklisted = True
+            
+        if is_blacklisted:
+            job_id = lead.get("job_id", "")
+            logger.info(f"Scorer: auto-rejecting blacklisted job {job_id}")
+            update_job_lead(job_id, {"status": "Dismissed"}, user_id=user_id)
+            counts["reject"] += 1
+        else:
+            filtered_leads.append(lead)
 
     # Score all jobs concurrently (each embed call is async)
-    tasks = [score_job(lead, master_embedding, resume_skills) for lead in leads]
+    tasks = [score_job(lead, master_embedding, resume_skills) for lead in filtered_leads]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _update_lead_async(jid, udict, uid):
         return await asyncio.to_thread(update_job_lead, jid, udict, user_id=uid)
 
     update_tasks = []
-    for lead, result in zip(leads, results):
+    for lead, result in zip(filtered_leads, results):
         job_id = lead.get("job_id", "")
 
         if isinstance(result, Exception):

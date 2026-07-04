@@ -14,6 +14,7 @@ ALTER TABLE user_profiles
 ALTER TABLE user_profiles
     ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 20,
     ADD COLUMN IF NOT EXISTS encrypted_keys JSONB DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}',
     ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
 
 -- 2. Alter job_leads for multi-user ownership

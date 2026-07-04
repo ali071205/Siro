@@ -71,13 +71,41 @@ def update_profile(updates: dict, user_id: Optional[str] = None) -> Optional[dic
 
 def upsert_job_lead(lead: dict) -> Optional[dict]:
     try:
-        resp = (
-            get_client()
-            .table("job_leads")
-            .upsert(lead, on_conflict="job_id")
-            .execute()
-        )
-        return resp.data[0] if resp.data else None
+        job_id = lead.get("job_id")
+        user_id = lead.get("user_id")
+        
+        # 1. Upsert into global_jobs
+        global_job_data = {
+            "job_id": job_id,
+            "company": lead.get("company"),
+            "title": lead.get("title"),
+            "description": lead.get("description") or lead.get("raw_description"),
+            "location": lead.get("location"),
+            "url": lead.get("url") or lead.get("job_url"),
+            "source": lead.get("source"),
+            "dedup_hash": lead.get("dedup_hash")
+        }
+        # Remove None values
+        global_job_data = {k: v for k, v in global_job_data.items() if v is not None}
+        get_client().table("global_jobs").upsert(global_job_data, on_conflict="job_id").execute()
+        
+        # 2. Upsert into user_job_pipelines
+        if user_id:
+            pipeline_data = {
+                "user_id": user_id,
+                "job_id": job_id,
+                "status": lead.get("status", "Found"),
+                "match_score": lead.get("match_score", 0),
+                "score_band": lead.get("score_band"),
+                "notes": lead.get("notes"),
+                "resume_url": lead.get("resume_url"),
+                "resume_tailored": lead.get("resume_tailored")
+            }
+            pipeline_data = {k: v for k, v in pipeline_data.items() if v is not None}
+            resp = get_client().table("user_job_pipelines").upsert(pipeline_data, on_conflict="user_id, job_id").execute()
+            return resp.data[0] if resp.data else None
+            
+        return global_job_data
     except Exception as e:
         logger.error(f"Error upserting lead {lead.get('job_id')}: {e}")
         return None
@@ -85,7 +113,7 @@ def upsert_job_lead(lead: dict) -> Optional[dict]:
 
 def update_job_lead(job_id: str, updates: dict[str, Any], user_id: Optional[str] = None) -> Optional[dict]:
     try:
-        q = get_client().table("job_leads").update(updates).eq("job_id", job_id)
+        q = get_client().table("user_job_pipelines").update(updates).eq("job_id", job_id)
         if user_id:
             q = q.eq("user_id", user_id)
         resp = q.execute()
@@ -95,13 +123,24 @@ def update_job_lead(job_id: str, updates: dict[str, Any], user_id: Optional[str]
         return None
 
 
+def _flatten_lead(row: dict) -> dict:
+    """Helper to flatten user_job_pipelines row joined with global_jobs."""
+    global_job = row.pop("global_jobs", {}) or {}
+    flat = {**global_job, **row}
+    # Map legacy keys for backward compatibility
+    flat["raw_description"] = flat.get("description")
+    flat["job_url"] = flat.get("url")
+    flat["source_platform"] = flat.get("source")
+    return flat
+
+
 def get_leads_by_status(status: str, limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
     try:
-        q = get_client().table("job_leads").select("*").eq("status", status)
+        q = get_client().table("user_job_pipelines").select("*, global_jobs(*)").eq("status", status)
         if user_id:
             q = q.eq("user_id", user_id)
         resp = q.limit(limit).execute()
-        return resp.data or []
+        return [_flatten_lead(row) for row in (resp.data or [])]
     except Exception as e:
         logger.error(f"Error fetching leads by status {status}: {e}")
         return []
@@ -112,15 +151,15 @@ def get_leads_by_band(band: str, limit: int = 50, user_id: Optional[str] = None)
     try:
         q = (
             get_client()
-            .table("job_leads")
-            .select("*")
+            .table("user_job_pipelines")
+            .select("*, global_jobs(*)")
             .eq("score_band", band)
             .eq("status", "Found")
         )
         if user_id:
             q = q.eq("user_id", user_id)
         resp = q.order("match_score", desc=True).limit(limit).execute()
-        return resp.data or []
+        return [_flatten_lead(row) for row in (resp.data or [])]
     except Exception as e:
         logger.error(f"Error fetching leads by band {band}: {e}")
         return []
@@ -128,11 +167,15 @@ def get_leads_by_band(band: str, limit: int = 50, user_id: Optional[str] = None)
 
 def get_lead_by_id(job_id: str, user_id: Optional[str] = None) -> Optional[dict]:
     try:
-        q = get_client().table("job_leads").select("*").eq("job_id", job_id)
+        q = get_client().table("user_job_pipelines").select("*, global_jobs(*)").eq("job_id", job_id)
         if user_id:
             q = q.eq("user_id", user_id)
         resp = q.limit(1).execute()
-        return resp.data[0] if resp.data else None
+        
+        if not resp.data:
+            return None
+            
+        return _flatten_lead(resp.data[0])
     except Exception as e:
         logger.error(f"Error fetching lead {job_id}: {e}")
         return None
@@ -143,11 +186,23 @@ def get_existing_dedup_hashes(hashes: list[str], user_id: Optional[str] = None) 
     if not hashes:
         return set()
     try:
-        q = get_client().table("job_leads").select("dedup_hash").in_("dedup_hash", hashes)
         if user_id:
-            q = q.eq("user_id", user_id)
-        resp = q.execute()
-        return {row["dedup_hash"] for row in (resp.data or [])}
+            # We need to check if the user already has these jobs
+            # user_job_pipelines uses job_id. We must join global_jobs to get dedup_hash
+            # or, more simply, we can just fetch the dedup_hashes for this user.
+            q = get_client().table("user_job_pipelines").select("global_jobs(dedup_hash)").eq("user_id", user_id)
+            resp = q.execute()
+            existing = set()
+            for row in (resp.data or []):
+                gj = row.get("global_jobs")
+                if gj and gj.get("dedup_hash"):
+                    existing.add(gj["dedup_hash"])
+            return existing.intersection(set(hashes))
+        else:
+            # Global dedup check
+            q = get_client().table("global_jobs").select("dedup_hash").in_("dedup_hash", hashes)
+            resp = q.execute()
+            return {row["dedup_hash"] for row in (resp.data or [])}
     except Exception as e:
         logger.error(f"Error checking dedup hashes: {e}")
         return set()
@@ -156,7 +211,7 @@ def get_existing_dedup_hashes(hashes: list[str], user_id: Optional[str] = None) 
 def get_all_stats(user_id: Optional[str] = None) -> dict:
     """Aggregate pipeline statistics for the dashboard and daily digest."""
     try:
-        q = get_client().table("job_leads").select("status, score_band")
+        q = get_client().table("user_job_pipelines").select("status, score_band")
         if user_id:
             q = q.eq("user_id", user_id)
         resp = q.execute()
@@ -251,27 +306,42 @@ def store_company_context(company_name: str, context: str) -> None:
 #  DELIVERY QUEUE
 # ─────────────────────────────────────────────────────────
 
-def queue_delivery(job_id: str) -> None:
+def queue_delivery(job_id: str, user_id: str) -> None:
     try:
         get_client().table("delivery_queue").insert(
-            {"job_id": job_id, "status": "pending", "attempts": 0}
+            {"job_id": job_id, "user_id": user_id, "status": "pending", "attempts": 0}
         ).execute()
     except Exception as e:
         logger.error(f"Error queuing delivery for job {job_id}: {e}")
 
 
-def get_pending_deliveries(max_attempts: int = 3) -> list[dict]:
+def get_pending_deliveries(max_attempts: int = 3, user_id: str = None) -> list[dict]:
     try:
-        resp = (
+        query = (
             get_client()
             .table("delivery_queue")
-            .select("*, job_leads(*)")
+            .select("*, user_job_pipelines(*, global_jobs(*))")
             .eq("status", "pending")
             .lt("attempts", max_attempts)
-            .order("created_at")
-            .execute()
         )
-        return resp.data or []
+        if user_id:
+            query = query.eq("user_id", user_id)
+            
+        resp = query.order("created_at").execute()
+        
+        # Flatten the response to maintain backward compatibility (lead format)
+        deliveries = []
+        for d in (resp.data or []):
+            pipelines = d.pop("user_job_pipelines", [])
+            # In Supabase, if it's a one-to-many relationship it returns a list, if one-to-one it returns a dict.
+            # Assuming list because we didn't specify foreign key constraint in a way that guarantees 1-to-1 from delivery_queue
+            pipeline = pipelines[0] if isinstance(pipelines, list) and pipelines else pipelines
+            
+            if pipeline:
+                d["job_leads"] = _flatten_lead(pipeline)
+            deliveries.append(d)
+            
+        return deliveries
     except Exception as e:
         logger.error(f"Error fetching pending deliveries: {e}")
         return []

@@ -20,7 +20,7 @@ Dependencies:
     harvesting.harvest_orchestrator, intelligence.keyword_filter,
     intelligence.deduplicator, core.database_manager
 """
-from core.database_manager import get_client
+from core.database_manager import get_client, upsert_job_lead
 from core.logger import get_logger
 from harvesting.harvest_orchestrator import run_harvest, build_lead
 from intelligence.deduplicator import filter_new_jobs
@@ -45,6 +45,39 @@ class DiscoveryAgent:
             logger.error(f"DiscoveryAgent: harvest failed — {e}")
             return []
 
+    async def run_for_user(self, search_query: str, user_id: str) -> list[dict]:
+        """
+        Phase 3: Optimized Local Search First.
+        Queries the global_jobs pool for recent matches. 
+        If fewer than 5 exist locally, falls back to hitting the APIs.
+        Returns raw jobs ready for save_leads.
+        """
+        logger.info(f"DiscoveryAgent: searching local DB for '{search_query}' (user {user_id})...")
+        try:
+            # Query global_jobs where title or description matches the query
+            # and job_id not in user_job_pipelines for this user
+            resp = get_client().rpc(
+                "search_global_jobs_for_user",
+                {"p_user_id": user_id, "p_query": search_query or "", "p_limit": 20}
+            ).execute()
+            
+            local_jobs = resp.data or []
+            logger.info(f"DiscoveryAgent: found {len(local_jobs)} matching jobs locally.")
+            
+            if len(local_jobs) >= 5:
+                # We have enough local jobs, no need to burn API credits
+                return local_jobs
+                
+            # Fallback to external APIs
+            logger.info(f"DiscoveryAgent: insufficient local jobs. Falling back to external APIs for '{search_query}'...")
+            api_jobs = await self.run(search_query=search_query)
+            return local_jobs + api_jobs
+            
+        except Exception as e:
+            logger.error(f"DiscoveryAgent: local search failed — {e}")
+            # Fallback on error
+            return await self.run(search_query=search_query)
+
     def save_leads(self, raw_jobs: list[dict], user_id: str) -> int:
         """
         Deduplicate raw_jobs against this user's existing leads,
@@ -66,13 +99,14 @@ class DiscoveryAgent:
         if not leads:
             return 0
 
-        try:
-            res = get_client().table("job_leads").upsert(
-                leads, on_conflict="job_id"
-            ).execute()
-            saved = len(res.data) if res.data else 0
-            logger.info(f"DiscoveryAgent: saved {saved} leads for user {user_id}")
-            return saved
-        except Exception as e:
-            logger.error(f"DiscoveryAgent: upsert failed — {e}")
-            return 0
+        saved = 0
+        for lead in leads:
+            try:
+                res = upsert_job_lead(lead)
+                if res:
+                    saved += 1
+            except Exception as e:
+                logger.error(f"DiscoveryAgent: failed to upsert lead {lead.get('job_id')} - {e}")
+                
+        logger.info(f"DiscoveryAgent: saved {saved} leads for user {user_id}")
+        return saved

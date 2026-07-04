@@ -1,0 +1,106 @@
+"""
+synthesis/company_research.py — Ghost Protocol v3.0
+
+Module for generating AI-driven company intelligence including:
+1. Autonomous Tech-Stack Extraction
+2. Stability & Layoff Risk Scoring
+3. Automated Interview Playbooks
+"""
+import json
+from core.logger import get_logger
+from synthesis.llm_groq import call_groq
+
+logger = get_logger(__name__)
+
+async def generate_company_intelligence(company_name: str) -> dict:
+    """
+    Generate the base intelligence (Tech Stack & Stability) for a company.
+    Uses Groq with a strict JSON format to return the stack, news, and risk score.
+    """
+    system_prompt = """You are an elite OSINT and AI tech recruiter intelligence agent.
+Given a company name, you must return a strict JSON object detailing their engineering stack, recent news/stability, and a layoff risk assessment based on your training knowledge.
+
+The output MUST be a JSON object with this exact schema:
+{
+  "name": "Company Name",
+  "industry": "Primary Industry/Domain",
+  "stack": ["Top 5-8 tech stack keywords, e.g. Rust, K8s, Go"],
+  "news_timeline": ["3 recent or notable news/funding/hiring events"],
+  "insight": "A 2-sentence highly analytical recruiter insight.",
+  "stability": {
+    "trend": "up" | "down" | "flat",
+    "risk_score": 0-100 (100 being extremely safe, 0 being bankrupt),
+    "risk_label": "High Runway" | "Moderate Risk" | "High Layoff Risk"
+  }
+}
+"""
+    user_prompt = f"Analyze the tech company: {company_name}"
+
+    try:
+        data = await call_groq(system_prompt, user_prompt)
+        # Strip markdown if present
+        if isinstance(data, str):
+            if data.startswith("```json"):
+                data = data[7:-3]
+            data = json.loads(data)
+        return data
+    except Exception as e:
+        logger.error(f"Error generating company intelligence for {company_name}: {e}")
+        # Return fallback dummy data so UI doesn't crash
+        return {
+            "name": company_name,
+            "industry": "Technology",
+            "stack": ["React", "Python", "Docker", "AWS"],
+            "news_timeline": ["Actively hiring engineering roles."],
+            "insight": f"Data not available for {company_name}. Assuming baseline startup risk.",
+            "stability": {
+                "trend": "flat",
+                "risk_score": 50,
+                "risk_label": "Unknown Risk"
+            }
+        }
+
+
+async def generate_interview_playbook(company_name: str, role: str = "Software Engineer") -> dict:
+    """
+    Generate an actionable interview playbook containing cultural values, 
+    historical technical questions, and recent product launches.
+    """
+    system_prompt = """You are a FAANG-level career coach and technical interviewer.
+Given a company and a role, generate an exclusive 'Interview Cheat Sheet / Playbook'.
+Scour your knowledge (simulating Glassdoor, Blind, Reddit) to provide:
+1. Cultural values to mention.
+2. The exact technical/system design questions they historically ask.
+3. Recent product launches to casually mention.
+
+Output MUST be a strict JSON object with this schema:
+{
+  "company": "Company Name",
+  "role": "Role Name",
+  "cultural_values": ["value 1 with explanation", "value 2 with explanation"],
+  "technical_questions": [
+    {"stage": "Phone Screen", "question": "..." },
+    {"stage": "System Design", "question": "..." },
+    {"stage": "Behavioral", "question": "..." }
+  ],
+  "product_launches": ["launch 1", "launch 2"]
+}
+"""
+    user_prompt = f"Generate playbook for {company_name} - {role}"
+
+    try:
+        data = await call_groq(system_prompt, user_prompt)
+        if isinstance(data, str):
+            if data.startswith("```json"):
+                data = data[7:-3]
+            data = json.loads(data)
+        return data
+    except Exception as e:
+        logger.error(f"Error generating playbook for {company_name}: {e}")
+        return {
+            "company": company_name,
+            "role": role,
+            "cultural_values": ["Focus on impact and ownership."],
+            "technical_questions": [{"stage": "Technical", "question": "Standard algorithmic questions."}],
+            "product_launches": ["Core product updates."]
+        }

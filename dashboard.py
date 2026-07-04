@@ -1,13 +1,18 @@
 import os
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+import json
+import pypdf
+import requests
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, UploadFile, File, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv, set_key
 
-from core.database_manager import get_client, update_job_lead, get_profile, update_profile, get_all_stats
+from core.database_manager import get_client, update_job_lead, get_profile, update_profile, get_all_stats, _flatten_lead
 from core.logger import get_logger
+from synthesis.llm_groq import call_groq
+from synthesis.company_research import generate_company_intelligence, generate_interview_playbook
 
 load_dotenv()
 logger = get_logger(__name__)
@@ -16,15 +21,9 @@ app = FastAPI(title="Ghost Protocol v3.0 SaaS Dashboard")
 
 
 def get_current_user_id(authorization: str = Header(None)) -> str:
-    """Validate Supabase JWT auth token or fallback to default first profile ID in dev mode."""
+    """Strictly validate Supabase JWT auth token."""
     if not authorization or not authorization.startswith("Bearer "):
-        try:
-            profile = get_profile()
-            if profile:
-                return profile["id"]
-        except Exception:
-            pass
-        return "15ecd7c9-d9e6-4ca9-9f09-8e432a4ad639"
+        raise HTTPException(status_code=401, detail="Unauthorized: Missing or invalid token format")
 
     token = authorization.split(" ")[1]
     try:
@@ -35,13 +34,7 @@ def get_current_user_id(authorization: str = Header(None)) -> str:
         return user_res.user.id
     except Exception as e:
         logger.error(f"JWT Verification failed: {e}")
-        try:
-            profile = get_profile()
-            if profile:
-                return profile["id"]
-        except Exception:
-            pass
-        return "15ecd7c9-d9e6-4ca9-9f09-8e432a4ad639"
+        raise HTTPException(status_code=401, detail="Unauthorized: Token verification failed")
 
 # Static resumes dir (local fallback — Supabase Storage is primary in v2)
 RESUMES_DIR = os.path.join(os.getcwd(), "data", "resumes")
@@ -89,14 +82,6 @@ class EnvUpdateRequest(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def serve_dashboard():
-    html_path = os.path.join(os.getcwd(), "interface", "dashboard", "index.html")
-    if not os.path.exists(html_path):
-        raise HTTPException(status_code=404, detail="Dashboard index.html not found.")
-    return FileResponse(html_path)
-
-
 @app.get("/api/stats")
 async def get_stats(user_id: str = Depends(get_current_user_id)):
     """Real-time pipeline stats — includes v2 band counts."""
@@ -123,13 +108,23 @@ async def get_leads(band: str = "", status: str = "", limit: int = 100, user_id:
     """Fetch job leads with optional band/status filter for the authenticated user."""
     client = get_client()
     try:
-        q = client.table("job_leads").select("*").eq("user_id", user_id).order("created_at", desc=True)
+        q = client.table("user_job_pipelines").select("*, global_jobs(*)").eq("user_id", user_id).order("created_at", desc=True)
         if band:
             q = q.eq("score_band", band.upper())
         if status:
             q = q.eq("status", status)
         resp = q.limit(limit).execute()
-        return resp.data or []
+        
+        leads = []
+        for row in (resp.data or []):
+            flat = _flatten_lead(row)
+            # Add score_total and score for frontend compatibility
+            match_score = flat.get("match_score", 0) or 0
+            score_val = int(match_score * 100) if match_score <= 1.0 else int(match_score)
+            flat["score_total"] = score_val
+            flat["score"] = score_val
+            leads.append(flat)
+        return leads
     except Exception as e:
         logger.error(f"Leads fetch error: {e}")
         return []
@@ -137,7 +132,7 @@ async def get_leads(band: str = "", status: str = "", limit: int = 100, user_id:
 
 @app.post("/api/leads/{job_id}/status")
 async def change_lead_status(job_id: str, request: StatusUpdateRequest, user_id: str = Depends(get_current_user_id)):
-    valid = ["Found", "Tailored", "Approved", "Applied", "Dismissed"]
+    valid = ["Found", "Tailored", "Approved", "Applied", "Dismissed", "Interviewing", "Offer", "Rejected"]
     if request.status not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid}")
     updated = update_job_lead(job_id, {"status": request.status}, user_id=user_id)
@@ -269,12 +264,42 @@ async def fetch_env():
 
 # ── Admin Routes ──────────────────────────────────────────────────────────────
 
-@app.get("/admin")
-async def serve_admin_dashboard():
-    html_path = os.path.join(os.getcwd(), "interface", "dashboard", "admin.html")
-    if not os.path.exists(html_path):
-        raise HTTPException(status_code=404, detail="Admin index.html not found.")
-    return FileResponse(html_path)
+@app.post("/api/profile/upload")
+async def upload_master_resume(
+    resume: UploadFile = File(...), 
+    user_id: str = Depends(get_current_user_id)
+):
+    try:
+        os.makedirs(RESUMES_DIR, exist_ok=True)
+        file_path = os.path.join(RESUMES_DIR, f"master_{user_id}.pdf")
+        with open(file_path, "wb") as f:
+            f.write(await resume.read())
+            
+        text = ""
+        with open(file_path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+                
+        system_prompt = "You are a precise resume parser. Extract the user's details from the following resume text and output ONLY a valid JSON object matching this schema: {\"name\": \"\", \"email\": \"\", \"phone\": \"\", \"skills\": \"comma separated list\", \"experience\": \"Company | Role | Dates\\n- Bullet points\", \"education\": \"\", \"links\": \"\"}. Return ONLY the JSON, no markdown formatting."
+        user_prompt = f"RESUME TEXT:\n{text[:8000]}"
+        
+        parsed_data = await call_groq(system_prompt, user_prompt)
+        
+        # Strip markdown if Gemini included it (e.g. ```json)
+        if isinstance(parsed_data, str):
+            if parsed_data.startswith("```json"):
+                parsed_data = parsed_data[7:-3]
+            parsed_data = json.loads(parsed_data)
+            
+        json_path = os.path.join(RESUMES_DIR, f"master_{user_id}.json")
+        with open(json_path, "w") as f:
+            json.dump(parsed_data, f)
+            
+        return {"status": "success", "profile": parsed_data}
+    except Exception as e:
+        logger.error(f"Error processing resume upload: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/admin/users")
@@ -334,11 +359,118 @@ async def admin_get_logs(limit: int = 50):
         return []
 
 
+@app.get("/api/companies/research")
+async def get_company_research(company: str):
+    """Generate OSINT tech stack and risk assessment for a company."""
+    if not company:
+        raise HTTPException(status_code=400, detail="Company name required")
+    data = await generate_company_intelligence(company)
+    return data
+
+
+@app.get("/api/companies/playbook")
+async def get_interview_playbook(company: str, role: str = "Software Engineer"):
+    """Generate an automated interview playbook."""
+    if not company:
+        raise HTTPException(status_code=400, detail="Company name required")
+    data = await generate_interview_playbook(company, role)
+    return data
+
+
+class GhostWriterRequest(BaseModel):
+    company: str
+    role: str
+
+@app.post("/api/applications/ghost-writer")
+async def ghost_writer_followup(request: GhostWriterRequest):
+    """Generate a highly professional follow-up email."""
+    system_prompt = """You are an elite executive career coach.
+Write a concise, professional follow-up email to a recruiter or hiring manager.
+The applicant applied 5+ days ago and hasn't heard back. 
+The tone should be polite, enthusiastic, but not desperate. 
+Output ONLY the email body (with Subject line at the top), no markdown formatting or extra text."""
+    user_prompt = f"Write a follow-up email for the {request.role} role at {request.company}."
+    
+    try:
+        email = await call_groq(system_prompt, user_prompt)
+        return {"status": "ok", "email": email}
+    except Exception as e:
+        logger.error(f"Ghost Writer Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate email")
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Retrieve settings from DB (using first user for now)."""
+    try:
+        resp = get_client().table("user_profiles").select("id, preferences").limit(1).execute()
+        if not resp.data:
+            return {}
+        user = resp.data[0]
+        prefs = user.get("preferences") or {}
+        
+        # If DB is empty, read legacy settings.json
+        if not prefs:
+            try:
+                with open("settings.json", "r") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return prefs
+    except Exception as e:
+        logger.error(f"Error reading settings from DB: {e}")
+        return {}
+
+
+@app.post("/api/settings")
+async def update_settings(request: Request):
+    """Update user preferences in DB (using first user for now)."""
+    try:
+        data = await request.json()
+        resp = get_client().table("user_profiles").select("id").limit(1).execute()
+        
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="No users found to update")
+            
+        user_id = resp.data[0]["id"]
+        
+        update_resp = get_client().table("user_profiles").update({"preferences": data}).eq("id", user_id).execute()
+        
+        # Also sync to settings.json for legacy scripts until fully migrated
+        try:
+            with open("settings.json", "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Warning: failed to sync legacy settings.json: {e}")
+            
+        return {"status": "ok", "updated_user": user_id}
+    except Exception as e:
+        logger.error(f"Error updating settings in DB: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save settings to database")
+
+
 @app.get("/api/health")
 async def health_check():
     """Basic liveness probe for Hugging Face Spaces."""
     return {"status": "ok", "version": "3.0", "service": "Ghost Protocol"}
 
+
+# ── SPA Fallback ──────────────────────────────────────────────────────────────
+FRONTEND_DIST = os.path.join(os.getcwd(), "frontend", "dist", "client")
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    # Check if the requested path is a file in the dist directory
+    file_path = os.path.join(FRONTEND_DIST, full_path)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    # Otherwise fallback to index.html for TanStack client-side router
+    index_path = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    
+    raise HTTPException(status_code=404, detail="Frontend build not found.")
 
 if __name__ == "__main__":
     logger.info("🚀 Ghost Protocol v3.0 SaaS Dashboard → http://localhost:8080")
