@@ -84,14 +84,16 @@ class ApplicationAgent:
             "skipped": len(leads) - len(needs_pdf),
         }
 
-    async def process_deliveries(self) -> dict:
+    async def process_deliveries(self, profile: dict) -> dict:
         """Process the global delivery queue (Telegram → WhatsApp fallback)."""
         return await process_delivery_queue(
-            send_fn=send_job_card, fallback_fn=send_whatsapp_job_alert
+            profile=profile,
+            send_fn=send_job_card, 
+            fallback_fn=send_whatsapp_job_alert
         )
 
     async def run(self, profile: dict) -> dict:
         """Full outbound pipeline: generate PDFs then process delivery queue."""
         pdf_summary = await self.generate_pdfs(profile)
-        delivery_summary = await self.process_deliveries()
+        delivery_summary = await self.process_deliveries(profile)
         return {"pdf": pdf_summary, "delivery": delivery_summary}

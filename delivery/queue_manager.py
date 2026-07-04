@@ -5,6 +5,7 @@ Supabase-backed delivery queue with retry logic.
 Processes pending deliveries, retries failures, falls back to WhatsApp.
 """
 import asyncio
+import json
 
 from core.config import DELIVERY_MAX_ATTEMPTS
 from core.database_manager import (
@@ -21,9 +22,9 @@ logger = get_logger(__name__)
 RETRY_WAITS = [10, 30, 60]
 
 
-async def process_delivery_queue(send_fn, fallback_fn=None) -> dict:
+async def process_delivery_queue(profile: dict, send_fn, fallback_fn=None) -> dict:
     """
-    Process all pending items in the delivery queue.
+    Process all pending items in the delivery queue for a specific user.
 
     Args:
         send_fn:     async fn(lead: dict) -> bool  — primary Telegram sender
@@ -34,12 +35,31 @@ async def process_delivery_queue(send_fn, fallback_fn=None) -> dict:
     """
     logger.info("=== Stage 5: Delivery Queue processing ===")
 
-    pending = get_pending_deliveries(max_attempts=DELIVERY_MAX_ATTEMPTS)
+    user_id = profile.get("id")
+    pending = get_pending_deliveries(max_attempts=DELIVERY_MAX_ATTEMPTS, user_id=user_id)
     if not pending:
         logger.info("Delivery queue: nothing pending.")
         return {"sent": 0, "failed": 0, "total": 0}
 
     logger.info(f"Delivery queue: {len(pending)} items pending.")
+    
+    # Extract settings from profile
+    preferences = profile.get("preferences") or {}
+    
+    # Fallback to legacy settings.json
+    if not preferences:
+        try:
+            with open("settings.json", "r") as f:
+                preferences = json.load(f)
+        except:
+            pass
+    
+    notifications = preferences.get("notifications", {})
+    scoring = preferences.get("scoring", {})
+    
+    telegram_enabled = notifications.get("instant_telegram_alerts", True)
+    telegram_threshold = scoring.get("telegram_threshold", 75)
+
     sent = failed = 0
 
     for item in pending:
@@ -47,6 +67,22 @@ async def process_delivery_queue(send_fn, fallback_fn=None) -> dict:
         # job_leads data is joined in get_pending_deliveries
         lead = item.get("job_leads") or {}
         job_id = item.get("job_id", "unknown")
+        
+        # Check settings guardrails
+        match_score_raw = lead.get("match_score", 0.0)
+        # handle case if match_score is None
+        if match_score_raw is None: match_score_raw = 0.0
+        match_score_pct = float(match_score_raw) * 100
+
+        if not telegram_enabled:
+            logger.info(f"Delivery: skipping {job_id} because Telegram alerts are disabled.")
+            update_delivery_status(delivery_id, "sent")
+            continue
+            
+        if match_score_pct < telegram_threshold:
+            logger.info(f"Delivery: skipping {job_id} because score {match_score_pct:.1f} < threshold {telegram_threshold}.")
+            update_delivery_status(delivery_id, "sent")
+            continue
 
         success = await _attempt_delivery(
             delivery_id=delivery_id,
