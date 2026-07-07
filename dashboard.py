@@ -26,10 +26,10 @@ process_pool = ProcessPoolExecutor(max_workers=1)
 
 # Sync wrappers — ProcessPoolExecutor only accepts plain sync functions.
 # These bridge the gap between the async orchestrators and the executor.
-def _run_pipeline(query: str = None):
+def _run_pipeline(query: str = None, user_id: str = None):
     import asyncio
     from main_orchestrator import process_pipeline
-    asyncio.run(process_pipeline(manual_query=query))
+    asyncio.run(process_pipeline(manual_query=query, target_user_id=user_id))
 
 def _run_digest():
     import asyncio
@@ -212,11 +212,12 @@ async def change_lead_status(job_id: str, request: StatusUpdateRequest, user_id:
 
 @app.post("/api/harvest")
 async def trigger_pipeline(request: HarvestRequest, user_id: str = Depends(get_current_user_id)):
-    """Trigger the full pipeline run in an isolated process pool."""
+    """Trigger the full pipeline run scoped to the authenticated user only."""
     asyncio.get_running_loop().run_in_executor(
         process_pool,
         _run_pipeline,
-        request.query or None
+        request.query or None,
+        user_id,          # ← KEY FIX: scope harvest to the requesting user only
     )
     return {
         "status": "ok",

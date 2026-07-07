@@ -1,9 +1,8 @@
 import { ReactNode } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import {
-  LayoutDashboard, Search, Sparkles, FileText, Building2, Send,
-  BarChart3, Settings, Ghost, Bell, MessageCircle, Activity,
-  ChevronRight, Cpu, Wifi, Command, LogOut, Home,
+  LayoutDashboard, Search, FileText, Building2, Send,
+  Settings, Activity, ChevronRight, Cpu, Wifi, LogOut, RefreshCw,
 } from "lucide-react";
 import { AuthGuard } from "./AuthGuard";
 import { useAuth } from "../hooks/useAuth";
@@ -14,6 +13,22 @@ function Sidebar() {
   const location = useLocation();
   const { signOut } = useAuth();
   
+  const queryClient = useQueryClient();
+
+  // Dedicated credits query — 5 s polling, separate key so it's always fresh
+  const { data: credits, isFetching: creditsFetching } = useQuery({
+    queryKey: ["sidebar-credits"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/stats");
+      if (!res.ok) return { credits: 0, max_credits: 1000 };
+      const d = await res.json();
+      return { credits: d.credits ?? 0, max_credits: d.max_credits ?? 1000 };
+    },
+    refetchInterval: 5000,
+    staleTime: 0,
+  });
+
+  // Shared stats for nav badges
   const { data: stats } = useQuery({
     queryKey: ["dashboard-stats"],
     queryFn: async () => {
@@ -24,18 +39,25 @@ function Sidebar() {
     refetchInterval: 15000,
   });
 
-  // Calculate total active applications for the sidebar badge
-  const activeApps = (stats?.approved || 0) + (stats?.applied || 0) + (stats?.interviews || 0);
+  // Active leads = everything in the pipeline that isn't dismissed
+  const activeApps = Math.max(0, (stats?.total || 0) - (stats?.dismissed || 0));
+
+  const current   = credits?.credits    ?? 0;
+  const maxC      = credits?.max_credits ?? 1000;
+  const pct       = Math.round((current / maxC) * 100);
+  const barColor  = pct > 50 ? "from-neon-green to-neon-cyan"
+                  : pct > 20 ? "from-neon-amber to-neon-blue"
+                  : "from-red-500 to-neon-amber";
 
   const NAV = [
     { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
     { icon: FileText, label: "Resume Studio", path: "/resume-studio" },
-    { icon: Search, label: "Job Discovery", badge: stats?.discovered?.toString() || "0", path: "/job-discovery" },
+    { icon: Search, label: "Job Discovery", badge: stats?.total > 0 ? stats.total.toString() : null, path: "/job-discovery" },
     { icon: Building2, label: "Company Research", path: "/company-research" },
-    { icon: Send, label: "Applications", badge: activeApps.toString(), path: "/applications" },
+    { icon: Send, label: "Applications", badge: activeApps > 0 ? activeApps.toString() : null, path: "/applications" },
     { icon: Settings, label: "Settings", path: "/settings" },
   ];
-  
+
   return (
     <aside className="hidden lg:flex fixed left-0 top-0 h-screen w-64 flex-col glass-strong border-r border-white/8 z-40">
       <Link to="/" className="flex items-center gap-3 px-6 h-20 border-b border-white/5 hover:bg-white/[0.02] transition-colors cursor-pointer">
@@ -76,35 +98,52 @@ function Sidebar() {
                   {item.badge}
                 </span>
               )}
-              {i === 0 && (
-                <ChevronRight className="w-3.5 h-3.5 opacity-60" />
-              )}
+              {i === 0 && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
             </Link>
           );
         })}
       </nav>
 
+      {/* Credits / Engine Usage card */}
       <div className="p-3 border-t border-white/5">
-        <div className="glass rounded-xl p-3">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Cpu className="w-3.5 h-3.5 text-neon-green" />
-              <span className="text-[12px] font-mono text-muted-foreground">Engine Usage</span>
+        <div className="glass rounded-xl p-3 space-y-2">
+          {/* Header row */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Cpu className={`w-3.5 h-3.5 ${pct > 50 ? 'text-neon-green' : pct > 20 ? 'text-neon-amber' : 'text-red-400'}`} />
+              <span className="text-[12px] font-mono text-muted-foreground">Engine Credits</span>
             </div>
-            <span className="text-[10px] font-mono text-neon-cyan">{Math.round(((stats?.credits ?? 0) / (stats?.max_credits ?? 1000)) * 100)}%</span>
+            <button
+              title="Refresh credits"
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["sidebar-credits"] })}
+              className="text-muted-foreground hover:text-white transition-colors"
+            >
+              <RefreshCw className={`w-3 h-3 ${creditsFetching ? 'animate-spin' : ''}`} />
+            </button>
           </div>
-          <div className="flex flex-col gap-1">
-            <span className="text-[11px] font-mono text-muted-foreground">Tokens</span>
-            <div className="flex items-baseline gap-1">
-              <span className="text-lg font-bold font-mono text-glow-cyan text-neon-cyan">{(stats?.credits ?? 0).toLocaleString()}</span>
-              <span className="text-xs text-muted-foreground">/ {(stats?.max_credits ?? 1000).toLocaleString()}</span>
-            </div>
+
+          {/* Credit count */}
+          <div className="flex items-baseline gap-1">
+            <span
+              className={`text-xl font-bold font-mono transition-all duration-500 ${
+                pct > 50 ? 'text-neon-cyan' : pct > 20 ? 'text-neon-amber' : 'text-red-400'
+              }`}
+            >
+              {current.toLocaleString()}
+            </span>
+            <span className="text-xs text-muted-foreground font-mono">/ {maxC.toLocaleString()} left</span>
           </div>
-          <div className="mt-2 h-1 rounded-full bg-white/5 overflow-hidden">
-            <div 
-              className="h-full bg-gradient-to-r from-neon-blue to-neon-cyan transition-all duration-1000" 
-              style={{ width: `${Math.round(((stats?.credits ?? 0) / (stats?.max_credits ?? 1000)) * 100)}%` }}
+
+          {/* Depleting progress bar */}
+          <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+            <div
+              className={`h-full bg-gradient-to-r ${barColor} transition-all duration-700 ease-in-out`}
+              style={{ width: `${pct}%` }}
             />
+          </div>
+
+          <div className="text-[10px] font-mono text-muted-foreground/50 text-right">
+            {pct}% remaining · auto-refills monthly
           </div>
         </div>
       </div>
