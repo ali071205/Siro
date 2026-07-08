@@ -34,7 +34,9 @@ RUN fc-cache -fv
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install -r /app/requirements.txt
 
 # ── Application code ──────────────────────────────────────────────────────────
 COPY . /app
