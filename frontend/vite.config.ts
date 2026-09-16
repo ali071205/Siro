@@ -17,8 +17,4 @@ export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
   },
-  nitro: {
-    // Output preset for Vercel deployment
-    preset: "vercel",
-  },
 });
