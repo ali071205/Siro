@@ -233,10 +233,10 @@ function Nav() {
         </div>
 
         <div className="hidden md:flex items-center gap-3">
-          <a href="/auth" className="text-white/50 text-sm hover:text-white transition-colors duration-300 px-4 py-2">
+          <a href="/dashboard" className="text-white/50 text-sm hover:text-white transition-colors duration-300 px-4 py-2">
             Sign In
           </a>
-          <a href="/auth" className="glass glow-btn-glass flex items-center justify-center px-5 py-2.5 rounded-full text-white text-sm font-medium tracking-wide">
+          <a href="/dashboard" className="glass glow-btn-glass flex items-center justify-center px-5 py-2.5 rounded-full text-white text-sm font-medium tracking-wide">
             Launch PhantmOS
           </a>
         </div>
@@ -269,8 +269,8 @@ function Nav() {
               {l.label}
             </a>
           ))}
-          <a href="/auth" className="text-white/50 text-xl mt-4">Sign In</a>
-          <a href="/auth" className="mt-2 glass glow-btn-glass px-8 py-3 rounded-full text-white text-lg font-medium">Launch PhantmOS</a>
+          <a href="/dashboard" className="text-white/50 text-xl mt-4">Sign In</a>
+          <a href="/dashboard" className="mt-2 glass glow-btn-glass px-8 py-3 rounded-full text-white text-lg font-medium">Launch PhantmOS</a>
           
           <button className="absolute top-6 right-6 text-white/50" onClick={() => setMobileMenuOpen(false)}>
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>
@@ -546,7 +546,7 @@ function App() {
 
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.7, duration: 0.8 }} className="flex flex-wrap gap-4 mb-14">
-              <a href="/auth" className="glow-btn-white relative inline-flex items-center justify-center px-8 py-4 bg-white text-black font-semibold text-sm tracking-wide rounded-full transition-all duration-300">
+              <a href="/dashboard" className="glow-btn-white relative inline-flex items-center justify-center px-8 py-4 bg-white text-black font-semibold text-sm tracking-wide rounded-full transition-all duration-300">
                 Launch PhantmOS
               </a>
               <a href="/dashboard" className="glow-btn-glass glass flex items-center gap-2 px-8 py-4 text-white font-medium text-sm tracking-wide rounded-full group transition-all duration-300">
@@ -891,7 +891,7 @@ function App() {
               Upload your résumé. Set your target roles. PhantmOS runs the rest — discovery, scoring, tailoring, PDFs, and delivery — fully on autopilot.
             </p>
             <div className="flex flex-wrap gap-4 justify-center">
-              <a href="/auth" className="glow-btn-white inline-flex items-center justify-center px-11 py-5 bg-white text-black font-semibold text-sm tracking-wide rounded-full transition-all duration-300">
+              <a href="/dashboard" className="glow-btn-white inline-flex items-center justify-center px-11 py-5 bg-white text-black font-semibold text-sm tracking-wide rounded-full transition-all duration-300">
                 Start Free
               </a>
               <a href="/dashboard" className="glow-btn-glass glass flex items-center justify-center gap-2 px-11 py-5 text-white font-medium text-sm tracking-wide rounded-full group transition-all duration-300">

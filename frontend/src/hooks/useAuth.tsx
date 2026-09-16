@@ -1,88 +1,40 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { Session, User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
-import { setGlobalAuthToken } from '../lib/api';
+import React, { createContext, useContext, useState } from 'react';
 
 interface AuthContextType {
-  session: Session | null;
-  user: User | null;
+  session: any;
+  user: any;
   loading: boolean;
   signOut: () => Promise<void>;
 }
 
+const mockUser = {
+  id: 'demo-user-001',
+  email: 'demo@phantmos.ai',
+  user_metadata: {
+    full_name: 'Alex Rivera',
+    avatar_url: '',
+  },
+};
+
+const mockSession = {
+  access_token: 'demo-token',
+  user: mockUser,
+};
+
 const AuthContext = createContext<AuthContextType>({
-  session: null,
-  user: null,
-  loading: true,
+  session: mockSession,
+  user: mockUser,
+  loading: false,
   signOut: async () => {},
 });
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const queryClient = useQueryClient();
-
-  useEffect(() => {
-    let realtimeChannel: any = null;
-
-    supabase.auth
-      .getSession()
-      .then(({ data: { session } }) => {
-        setSession(session);
-        setUser(session?.user ?? null);
-        setGlobalAuthToken(session?.access_token ?? null);
-        setLoading(false);
-
-        // OPTIMIZATION 6: Global WebSockets
-        if (session?.user && !realtimeChannel) {
-          try {
-            realtimeChannel = supabase
-              .channel('dashboard-realtime')
-              .on(
-                'postgres_changes',
-                {
-                  event: '*',
-                  schema: 'public',
-                  table: 'user_job_pipelines',
-                  filter: `user_id=eq.${session.user.id}`,
-                },
-                () => {
-                  queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
-                  queryClient.invalidateQueries({ queryKey: ['leads'] });
-                }
-              )
-              .subscribe();
-          } catch (e) {
-            console.warn('Realtime subscription error:', e);
-          }
-        }
-      })
-      .catch((err) => {
-        console.warn('Supabase auth session error (demo mode):', err);
-        setLoading(false);
-      });
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setGlobalAuthToken(session?.access_token ?? null);
-      setLoading(false);
-    });
-
-    return () => {
-      authListener?.subscription?.unsubscribe();
-      if (realtimeChannel) {
-        try {
-          supabase.removeChannel(realtimeChannel);
-        } catch {}
-      }
-    };
-  }, [queryClient]);
+  const [session] = useState<any>(mockSession);
+  const [user] = useState<any>(mockUser);
+  const [loading] = useState(false);
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    window.location.href = '/';
   };
 
   return (
