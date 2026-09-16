@@ -27,34 +27,44 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   useEffect(() => {
     let realtimeChannel: any = null;
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setGlobalAuthToken(session?.access_token ?? null);
-      setLoading(false);
-      
-      // OPTIMIZATION 6: Global WebSockets
-      if (session?.user && !realtimeChannel) {
-        realtimeChannel = supabase.channel('dashboard-realtime')
-          .on(
-            'postgres_changes',
-            {
-              event: '*',
-              schema: 'public',
-              table: 'user_job_pipelines',
-              filter: `user_id=eq.${session.user.id}`
-            },
-            () => {
-              // Automatically invalidate frontend caches so dashboard re-renders with fresh data natively!
-              queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
-              queryClient.invalidateQueries({ queryKey: ["leads"] });
-            }
-          )
-          .subscribe();
-      }
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        setSession(session);
+        setUser(session?.user ?? null);
+        setGlobalAuthToken(session?.access_token ?? null);
+        setLoading(false);
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        // OPTIMIZATION 6: Global WebSockets
+        if (session?.user && !realtimeChannel) {
+          try {
+            realtimeChannel = supabase
+              .channel('dashboard-realtime')
+              .on(
+                'postgres_changes',
+                {
+                  event: '*',
+                  schema: 'public',
+                  table: 'user_job_pipelines',
+                  filter: `user_id=eq.${session.user.id}`,
+                },
+                () => {
+                  queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+                  queryClient.invalidateQueries({ queryKey: ['leads'] });
+                }
+              )
+              .subscribe();
+          } catch (e) {
+            console.warn('Realtime subscription error:', e);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Supabase auth session error (demo mode):', err);
+        setLoading(false);
+      });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
       setGlobalAuthToken(session?.access_token ?? null);
@@ -62,9 +72,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     });
 
     return () => {
-      subscription.unsubscribe();
+      authListener?.subscription?.unsubscribe();
       if (realtimeChannel) {
-        supabase.removeChannel(realtimeChannel);
+        try {
+          supabase.removeChannel(realtimeChannel);
+        } catch {}
       }
     };
   }, [queryClient]);
