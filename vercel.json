@@ -1,6 +1,6 @@
 {
   "buildCommand": "npm install && npm run build",
-  "outputDirectory": ".output/public",
+  "outputDirectory": "dist",
   "installCommand": "echo skip",
   "framework": null,
   "rewrites": [
